@@ -11,6 +11,10 @@ import {
 } from "./imile-api.js";
 
 const API_KEY = process.env.IMILE_MCP_API_KEY || "";
+// The REST surface can be locked down independently of `/sse` so an existing
+// MCP client keeps working unchanged while automated HTTP callers are
+// required to authenticate. Falls back to the MCP key when unset.
+const REST_API_KEY = process.env.IMILE_REST_API_KEY || API_KEY;
 
 function createServer(): McpServer {
   const server = new McpServer({
@@ -269,15 +273,16 @@ app.get("/health", (_req, res) => {
  * tools expose, for server-to-server callers (e.g. the COD dashboard's
  * automation engine) that can't speak MCP over SSE.
  *
- * Auth mirrors the SSE endpoint: when `IMILE_MCP_API_KEY` is set, the key
- * must be supplied via the `x-api-key` header or an `api_key` query param.
+ * Auth: when `IMILE_REST_API_KEY` (or, failing that, `IMILE_MCP_API_KEY`) is
+ * set, the key must be supplied via the `x-api-key` header or an `api_key`
+ * query param.
  */
 const restAuth: express.RequestHandler = (req, res, next) => {
-  if (!API_KEY) return next();
+  if (!REST_API_KEY) return next();
   const provided =
     (req.header("x-api-key") as string | undefined) ||
     (req.query.api_key as string | undefined);
-  if (provided !== API_KEY) {
+  if (provided !== REST_API_KEY) {
     res.status(401).json({ success: false, error: "Invalid or missing API key" });
     return;
   }

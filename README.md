@@ -188,6 +188,7 @@ This compiles TypeScript to JavaScript using esbuild and runs the production bun
 |----------|-------------|---------|
 | `PORT` | HTTP server port | `8080` |
 | `IMILE_MCP_API_KEY` | Optional API key to protect the SSE endpoint. When set, clients must pass `?api_key=<key>` in the SSE URL | _(none — no auth)_ |
+| `IMILE_REST_API_KEY` | Optional API key to protect the `/api` REST endpoints, independent of the SSE key | _(falls back to `IMILE_MCP_API_KEY`)_ |
 
 Set variables via environment or a `.env` file:
 
@@ -304,16 +305,18 @@ For a self-hosted instance, replace the URL with your own:
 
 ### REST API (for non-MCP callers)
 
-MCP over SSE is awkward for plain server-to-server automation, so the same operations are also exposed as ordinary JSON endpoints under `/api`. They use the same auth as `/sse`: when `IMILE_MCP_API_KEY` is set, pass it as an `x-api-key` header (or `?api_key=`).
+MCP over SSE is awkward for plain server-to-server automation, so the same operations are also exposed as ordinary JSON endpoints under `/api`.
+
+Auth: set `IMILE_REST_API_KEY` to protect these endpoints and pass the key as an `x-api-key` header (or `?api_key=`). It's a separate variable from `IMILE_MCP_API_KEY` so the REST surface can be locked down without changing `/sse` for existing MCP clients; when it isn't set, `IMILE_MCP_API_KEY` is used instead.
 
 ```bash
 # Look up an order
 curl -s https://imile.shopinzo.bond/api/order/601234567890 \
-  -H "x-api-key: $IMILE_MCP_API_KEY"
+  -H "x-api-key: $IMILE_REST_API_KEY"
 
 # Reschedule to a specific date
 curl -s -X POST https://imile.shopinzo.bond/api/schedule \
-  -H "x-api-key: $IMILE_MCP_API_KEY" \
+  -H "x-api-key: $IMILE_REST_API_KEY" \
   -H 'content-type: application/json' \
   -d '{"tracking_number":"601234567890","date":"2026-06-05"}'
 ```
