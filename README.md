@@ -299,6 +299,39 @@ For a self-hosted instance, replace the URL with your own:
 | `GET` | `/sse` | SSE endpoint for MCP clients. Accepts optional `?api_key=` query param |
 | `POST` | `/messages?sessionId=<id>` | Message handler for active SSE sessions |
 | `GET` | `/health` | Health check — returns `{ "status": "ok", "service": "imile-mcp" }` |
+| `GET` | `/api/order/:trackingNumber` | REST order lookup (same data as `get_order_info`) |
+| `POST` | `/api/schedule` | REST schedule/reschedule (same action as `schedule_delivery`) |
+
+### REST API (for non-MCP callers)
+
+MCP over SSE is awkward for plain server-to-server automation, so the same operations are also exposed as ordinary JSON endpoints under `/api`. They use the same auth as `/sse`: when `IMILE_MCP_API_KEY` is set, pass it as an `x-api-key` header (or `?api_key=`).
+
+```bash
+# Look up an order
+curl -s https://imile.shopinzo.bond/api/order/601234567890 \
+  -H "x-api-key: $IMILE_MCP_API_KEY"
+
+# Reschedule to a specific date
+curl -s -X POST https://imile.shopinzo.bond/api/schedule \
+  -H "x-api-key: $IMILE_MCP_API_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"tracking_number":"601234567890","date":"2026-06-05"}'
+```
+
+`POST /api/schedule` accepts `{ tracking_number, date, fallback_to_suggested? }`. If the requested date is outside iMile's allowed range, it retries once with iMile's own suggested date (disable with `"fallback_to_suggested": false`). `scheduledDate` in the response is always the date that actually took effect:
+
+```json
+{
+  "success": true,
+  "trackingNumber": "601234567890",
+  "scheduledDate": "2026-06-05",
+  "requestedDate": "2026-06-04",
+  "usedSuggestedDate": true,
+  "warning": "Requested date 2026-06-04 was unavailable — used iMile's suggested date 2026-06-05 instead."
+}
+```
+
+Failure modes: `400` invalid input, `401` bad API key, `409` iMile refuses to schedule (includes `suggestedDate` + `availableDates`), `502` iMile API error.
 
 ---
 

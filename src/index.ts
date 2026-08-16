@@ -264,6 +264,162 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "imile-mcp" });
 });
 
+/**
+ * REST API — a plain HTTP surface over the same iMile operations the MCP
+ * tools expose, for server-to-server callers (e.g. the COD dashboard's
+ * automation engine) that can't speak MCP over SSE.
+ *
+ * Auth mirrors the SSE endpoint: when `IMILE_MCP_API_KEY` is set, the key
+ * must be supplied via the `x-api-key` header or an `api_key` query param.
+ */
+const restAuth: express.RequestHandler = (req, res, next) => {
+  if (!API_KEY) return next();
+  const provided =
+    (req.header("x-api-key") as string | undefined) ||
+    (req.query.api_key as string | undefined);
+  if (provided !== API_KEY) {
+    res.status(401).json({ success: false, error: "Invalid or missing API key" });
+    return;
+  }
+  next();
+};
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Order lookup: tracking status, address, and whether scheduling is allowed. */
+app.get("/api/order/:trackingNumber", restAuth, async (req, res) => {
+  try {
+    const info = await getOrderInfo(String(req.params.trackingNumber));
+    const order = info.orderBaseInfoVO;
+    const tracks = info.trackDetailVoList.slice(0, 5);
+    res.json({
+      success: true,
+      orderNumber: order.orderNumber,
+      client: order.clientName,
+      status: tracks[0]?.stageDesc || "Unknown",
+      lastUpdate: tracks[0]?.content || "No updates",
+      lastUpdateTime: tracks[0]?.time || null,
+      address: `${order.detailAddress}, ${order.city}`,
+      country: order.country,
+      amount: `${order.collectingMoney} ${order.currency}`,
+      consigneePhone: order.consigneePhone,
+      allowSchedule: info.allowSchedule,
+      notAllowScheduleDetail: info.notAllowScheduleDetail,
+      allowChangeAddress: info.allowChangeLocation,
+      lastScheduleTime: info.lastScheduleTime,
+      recentTracking: tracks.map((t) => ({
+        stage: t.stageDesc,
+        time: t.time,
+        detail: t.content,
+      })),
+    });
+  } catch (error) {
+    res.status(502).json({ success: false, error: errorMessage(error) });
+  }
+});
+
+/**
+ * Schedule / reschedule a delivery.
+ *
+ * Body: `{ tracking_number, date: "YYYY-MM-DD", fallback_to_suggested?: boolean }`
+ *
+ * When the requested date is outside iMile's allowed range and
+ * `fallback_to_suggested` is true (the default), the call is retried once
+ * with iMile's own suggested date so an unattended caller still gets the
+ * parcel rescheduled. `scheduledDate` in the response is always the date
+ * that actually took effect.
+ */
+app.post("/api/schedule", restAuth, express.json(), async (req, res) => {
+  const body = req.body as {
+    tracking_number?: string;
+    date?: string;
+    fallback_to_suggested?: boolean;
+  };
+  const trackingNumber = body?.tracking_number?.trim();
+  const date = body?.date?.trim();
+  const fallback = body?.fallback_to_suggested !== false;
+
+  if (!trackingNumber) {
+    res.status(400).json({ success: false, error: "tracking_number is required" });
+    return;
+  }
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    res.status(400).json({ success: false, error: "date is required in YYYY-MM-DD format" });
+    return;
+  }
+
+  try {
+    const result = await scheduleDelivery(trackingNumber, date);
+
+    if (result.allowSchedule && result.dateIsRang) {
+      res.json({
+        success: true,
+        trackingNumber,
+        scheduledDate: date,
+        requestedDate: date,
+        usedSuggestedDate: false,
+        isGreaterOfd: result.isGreaterOfd,
+        warning: result.isGreaterOfd
+          ? "Order is already out for delivery — the reschedule may not take effect."
+          : null,
+        message: `Delivery for order ${trackingNumber} scheduled for ${date}`,
+      });
+      return;
+    }
+
+    if (result.allowSchedule && !result.dateIsRang) {
+      const suggested = result.adviceDate || result.dateList?.[0] || null;
+      if (fallback && suggested) {
+        const retry = await scheduleDelivery(trackingNumber, suggested);
+        if (retry.allowSchedule && retry.dateIsRang) {
+          res.json({
+            success: true,
+            trackingNumber,
+            scheduledDate: suggested,
+            requestedDate: date,
+            usedSuggestedDate: true,
+            isGreaterOfd: retry.isGreaterOfd,
+            warning: `Requested date ${date} was unavailable — used iMile's suggested date ${suggested} instead.`,
+            message: `Delivery for order ${trackingNumber} scheduled for ${suggested}`,
+          });
+          return;
+        }
+      }
+      res.status(409).json({
+        success: false,
+        trackingNumber,
+        requestedDate: date,
+        error: `The requested date ${date} is not available for scheduling.`,
+        suggestedDate: suggested,
+        availableDates: result.dateList ?? [],
+      });
+      return;
+    }
+
+    res.status(409).json({
+      success: false,
+      trackingNumber,
+      requestedDate: date,
+      error: `Scheduling is not allowed for order ${trackingNumber} at this time.`,
+    });
+  } catch (error) {
+    // `scheduleDelivery` throws when iMile itself refuses (order closed,
+    // already returned, …). That is a business outcome, not a gateway
+    // failure, so surface it as 409 to keep 502 meaningful for real
+    // transport/API errors.
+    const message = errorMessage(error);
+    const refused = message.includes("Scheduling not allowed");
+    res.status(refused ? 409 : 502).json({
+      success: false,
+      trackingNumber,
+      requestedDate: date,
+      error: message,
+    });
+  }
+});
+
 const transports: Record<string, SSEServerTransport> = {};
 
 app.get("/sse", async (req, res) => {
